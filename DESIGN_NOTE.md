@@ -1,17 +1,108 @@
-1. How We Made Scraping Reliable
-Playwright (Headless Browser): INE’s mock store relies on JavaScript to update prices when selecting product options (e.g., Single vs. Pack of 2). Plain HTTP fetch requests only retrieve empty HTML templates, so we used Playwright Chromium to render the full browser page.
-Consent Banner Auto-Dismissal: The scraper automatically detects and clicks away cookie popups (.cookie-banner button) before attempting to select options so clicks are never blocked.
-Mouse Movement & Dwell Delays: To handle anti-bot checks and delayed price updates, the scraper simulates realistic cursor movements (40ms steps) and adds a mandatory 600ms dwell delay after clicking an option to let JavaScript recalculate the final price.
-3-Attempt Exponential Retry Loop: If the mock store loads slowly or returns a temporary error, the scraper retries up to 3 times (waiting 1s, 2s, and 4s) before marking the attempt as failed.
-Strict Regex Validation: Prices and stock levels are validated using regular expressions. If an attempt fails, it records an outcome of failed with empty price/stock fields rather than saving corrupted or zero data.
-2. Trade-offs Made
-Playwright vs. Cheerio/Axios:
-Trade-off: Playwright takes slightly more RAM (~100MB) and 2 seconds longer to boot than simple HTML parsing.
-Why: Static HTML parsing cannot execute JavaScript or option clicks on INE's storefront. Reliability and extraction accuracy were chosen over raw speed.
-External Cron (cron-job.org) vs. setInterval:
-Trade-off: Exposing a token-secured webhook endpoint (/api/scrape/cron?secret=...).
-Why: Free hosting backends (Render) sleep after 15 minutes of inactivity. An internal setInterval loop would freeze when the server sleeps, whereas an external cron ping reliably wakes up the backend every 2 hours.
-3. What AI Tools Got Wrong & How We Corrected It
-What AI Got Wrong Initially: The AI tool originally generated code using static axios.get() requests, expecting option prices to be present inside raw HTML strings.
-Why It Failed: On INE's live mock store, variant option prices only appear after user clicks and hover events trigger client-side JavaScript updates.
-How We Corrected It: We refactored the scraping architecture to launch Playwright Chromium, dismiss consent popups, click variant buttons, wait for network idle states, and log honest audit outcomes (success, retried, failed) to Supabase.
+## How We Made Scraping Reliable
+
+### 1. Playwright (Headless Browser)
+
+INE’s mock store relies on JavaScript to dynamically update prices when selecting product options (e.g., **Single** vs. **Pack of 2**).
+
+Plain HTTP requests using Axios only retrieve the initial HTML template and cannot execute the JavaScript required to update variant prices. To solve this, we used **Playwright with Chromium** to render and interact with the page like a real browser.
+
+### 2. Consent Banner Auto-Dismissal
+
+The scraper automatically detects and dismisses the cookie/consent popup (`.cookie-banner button`) before attempting to interact with product options.
+
+This ensures that the consent banner never blocks clicks or prevents the scraper from accessing the required elements.
+
+### 3. Mouse Movement & Dwell Delays
+
+To improve reliability when dealing with anti-bot checks and delayed JavaScript price updates, the scraper:
+
+- Simulates realistic cursor movements using 40ms movement steps.
+- Adds a mandatory **600ms dwell delay** after clicking a product option.
+- Allows the storefront JavaScript enough time to recalculate and display the final price.
+
+### 4. 3-Attempt Exponential Retry Loop
+
+If the mock store loads slowly or temporarily returns an error, the scraper automatically retries the operation up to **3 times**.
+
+The retry delays follow an exponential backoff strategy:
+
+- Attempt 1 → Immediate
+- Attempt 2 → Wait **1 second**
+- Attempt 3 → Wait **2 seconds**
+- Final retry → Wait **4 seconds**
+
+If all attempts fail, the operation is marked as failed rather than storing unreliable data.
+
+### 5. Strict Regex Validation
+
+Extracted prices and stock levels are validated using regular expressions before being stored.
+
+If the extracted values do not match the expected format, the scraper rejects them.
+
+Failed attempts are recorded with:
+
+- `outcome = failed`
+- Empty `price` field
+- Empty `stock` field
+
+This prevents corrupted, malformed, or zero-value data from being incorrectly saved.
+
+---
+
+## Trade-offs Made
+
+### Playwright vs. Cheerio/Axios
+
+**Trade-off:** Playwright requires slightly more resources, using approximately **100 MB of additional RAM** and taking around **2 seconds longer to boot** compared with simple HTML parsing.
+
+**Why:** Cheerio and Axios can only process static HTML. They cannot execute the JavaScript or interact with the variant-selection buttons required by INE's storefront.
+
+We therefore prioritized **reliability and extraction accuracy over raw scraping speed**.
+
+### External Cron (cron-job.org) vs. `setInterval`
+
+**Trade-off:** Instead of using an internal `setInterval` loop, we exposed a token-secured webhook endpoint:
+
+`/api/scrape/cron?secret=...`
+
+An external scheduler such as **cron-job.org** triggers this endpoint every 2 hours.
+
+**Why:** Free hosting platforms such as Render can put backend services to sleep after periods of inactivity. An internal `setInterval` process can therefore stop running while the server is asleep.
+
+Using an external cron service ensures that the scraping endpoint is periodically triggered and allows the backend to wake up when required.
+
+---
+
+## What AI Tools Got Wrong & How We Corrected It
+
+### What AI Got Wrong Initially
+
+The AI tool initially generated a scraper using static `axios.get()` requests and assumed that variant prices would already be present inside the raw HTML response.
+
+### Why It Failed
+
+On INE's live mock store, variant-specific prices are dynamically generated by client-side JavaScript.
+
+The price only becomes available after the user interacts with the product options, including clicks and hover-related events.
+
+Therefore, simply downloading the HTML with Axios was insufficient.
+
+### How We Corrected It
+
+We refactored the scraping architecture to use **Playwright with Chromium**.
+
+The updated workflow:
+
+1. Launches a Chromium browser instance.
+2. Loads the storefront.
+3. Dismisses the consent popup if present.
+4. Interacts with the product variant buttons.
+5. Simulates realistic mouse movement.
+6. Waits for JavaScript to update the price.
+7. Extracts the resulting price and stock values.
+8. Validates the extracted data using strict regex patterns.
+9. Retries failed operations using exponential backoff.
+10. Records honest audit outcomes such as `success`, `retried`, or `failed`.
+11. Stores the validated results in **Supabase**.
+
+This change made the scraper significantly more reliable for JavaScript-driven product data while ensuring that failed or invalid extraction attempts are not silently treated as successful results.
