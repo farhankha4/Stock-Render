@@ -1,0 +1,30 @@
+{
+  "name": "ine-store-price-tracker",
+  "version": "1.0.0",
+  "description": "Full-stack INE Mock Store product search, scheduled price tracker, price history chart, and honest scrape log auditor.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "build": "cd frontend && npm install && npm run build",
+    "scrape:headed": "node backend/scripts/run_headed_scraper.js",
+    "dev": "node server.js"
+  },
+  "keywords": [
+    "scraping",
+    "playwright",
+    "express",
+    "react",
+    "supabase",
+    "price-tracker"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.48.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "json2csv": "^6.0.0-alpha.2",
+    "playwright": "^1.49.1"
+  }
+}
