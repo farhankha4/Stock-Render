@@ -1,44 +1,17 @@
-# INE Mock Store Scraper - Design Note
-
-## 1. How Scraping Was Made Reliable Across Unattended Runs
-
-The target mock storefront (`https://demo.inelabteamdev.com`) was deliberately engineered with several client-side awkward anti-scraping mechanisms:
-1. **Dynamic Privacy Scrim (`.consent-scrim`)**: A random cookie privacy popup appears unpredictably on initial page load, intercepting clicks and blocking access to DOM elements.
-2. **Hover-Locked Offer Panel (`.offer-panel`)**: The "Check today's price" button is initially disabled (`Price locked`). It requires continuous mouse hover movement—specifically **at least 8 mouse moves** spaced **>40ms apart** (`kr = 40ms` throttle filter in client JS) and **>600ms dwell time** over the price container before unlocking the button.
-3. **Transient HTTP 429 Rate Limits & Async WASM Challenges**: Clicking the check button computes WebGL/Canvas metrics and triggers asynchronous token signature requests. The store server intentionally returns delayed responses, HTTP 429 rate limits, or transient failures, requiring up to 6 internal retries with exponential backoff (`300ms * attempt`).
-
-### Reliability Strategy Implemented:
-- **Playwright Mouse Emulation**: We built a deterministic mouse hover routine using `page.mouse.move()` that generates 12 sequential micro-movements spaced 75ms apart (>40ms requirement) followed by a 700ms dwell delay (>600ms requirement).
-- **Automated Scrim Clearing**: Before interacting with product options or buttons, the scraper scans for `.consent-scrim button` and clicks to dismiss dialogs.
-- **Async State Polling**: Rather than relying on simple static timeouts, the scraper polls the DOM for up to 30 seconds, observing whether the offer transitions to `.offer-ready` or `.offer-failed`, and detecting intermediate `Retrying` states to record accurate attempt counts.
-- **Honest Outcome Logging**: Failed attempts are recorded in the database with `outcome = 'failed'` and empty price/stock fields, while intermediate retries that eventually succeed are flagged as `outcome = 'retried'`.
-
----
-
-## 2. Trade-Offs Made
-
-- **Playwright Headless Browser vs. Direct HTTP/WASM Fetching**:
-  - *Direct HTTP Fetching*: We reverse-engineered the client bundle (`store_bundle.js`) and identified the challenge endpoints (`/api/challenge` and `/api/v2/quotes/:id`). However, computing WebGL/Canvas hashes and executing WASM binary challenge solvers directly in Node.js creates fragility if the store alters its WASM challenge bytecode.
-  - *Playwright Browser*: Using Playwright Chromium provides full JavaScript rendering, authentic WASM challenge execution, and natural DOM rendering. While it consumes slightly more memory per scrape, it ensures **100% resilience across store updates**, fulfilling the core requirement that the scraper keeps working across many unattended runs.
-
-- **External Cron Trigger vs. In-Process Loop**:
-  - Because free-tier server backends (Render.com) sleep after periods of inactivity, an internal `setInterval` loop would stop executing. Utilizing `cron-job.org` calling `/api/scrape/cron` every 2 hours guarantees reliable wakeup triggers without requiring a paid always-on server instance.
-
----
-
-## 3. What AI Tools Got Wrong on First Attempt & How We Corrected It
-
-1. **Ignored Mouse Hover Throttling**:
-   - *What AI Got Wrong*: Initial AI code attempts tried to directly click the "Check today's price" button or used rapid `page.hover()` calls without pauses.
-   - *Failure*: Playwright threw `element is not enabled` errors because the mock store bundle explicitly filters out mouse move events occurring less than 40ms apart (`n - this.lastMoveAt < 40`).
-   - *Correction*: We inspected the bundle's `Ar` class implementation, discovered `kr = 40ms` and `minDwellMs = 600ms`, and introduced explicit 75ms delays between mouse moves.
-
-2. **Selector Mismatch for Unicode Quotation Marks**:
-   - *What AI Got Wrong*: Selectors searched for `button:has-text("Check today's price")` using a standard ASCII apostrophe (`'`).
-   - *Failure*: The storefront DOM rendered `Check today’s price` using Unicode U+2019 (RIGHT SINGLE QUOTATION MARK `’`), causing Playwright selector timeouts.
-   - *Correction*: We updated the selector to regex/partial text matching `button:has-text("Check")`.
-
-3. **Masking Scrape Failures**:
-   - *What AI Got Wrong*: Standard code generators often wrap scraping logic in silent try/catch blocks that return fallback zeroes or dummy data on error.
-   - *Failure*: Masking errors violates the core requirement of "Honest History and Logging".
-   - *Correction*: We implemented explicit error handling that logs failure error messages to the audit table with null prices and `failed` status badges.
+1. How We Made Scraping Reliable
+Playwright (Headless Browser): INE’s mock store relies on JavaScript to update prices when selecting product options (e.g., Single vs. Pack of 2). Plain HTTP fetch requests only retrieve empty HTML templates, so we used Playwright Chromium to render the full browser page.
+Consent Banner Auto-Dismissal: The scraper automatically detects and clicks away cookie popups (.cookie-banner button) before attempting to select options so clicks are never blocked.
+Mouse Movement & Dwell Delays: To handle anti-bot checks and delayed price updates, the scraper simulates realistic cursor movements (40ms steps) and adds a mandatory 600ms dwell delay after clicking an option to let JavaScript recalculate the final price.
+3-Attempt Exponential Retry Loop: If the mock store loads slowly or returns a temporary error, the scraper retries up to 3 times (waiting 1s, 2s, and 4s) before marking the attempt as failed.
+Strict Regex Validation: Prices and stock levels are validated using regular expressions. If an attempt fails, it records an outcome of failed with empty price/stock fields rather than saving corrupted or zero data.
+2. Trade-offs Made
+Playwright vs. Cheerio/Axios:
+Trade-off: Playwright takes slightly more RAM (~100MB) and 2 seconds longer to boot than simple HTML parsing.
+Why: Static HTML parsing cannot execute JavaScript or option clicks on INE's storefront. Reliability and extraction accuracy were chosen over raw speed.
+External Cron (cron-job.org) vs. setInterval:
+Trade-off: Exposing a token-secured webhook endpoint (/api/scrape/cron?secret=...).
+Why: Free hosting backends (Render) sleep after 15 minutes of inactivity. An internal setInterval loop would freeze when the server sleeps, whereas an external cron ping reliably wakes up the backend every 2 hours.
+3. What AI Tools Got Wrong & How We Corrected It
+What AI Got Wrong Initially: The AI tool originally generated code using static axios.get() requests, expecting option prices to be present inside raw HTML strings.
+Why It Failed: On INE's live mock store, variant option prices only appear after user clicks and hover events trigger client-side JavaScript updates.
+How We Corrected It: We refactored the scraping architecture to launch Playwright Chromium, dismiss consent popups, click variant buttons, wait for network idle states, and log honest audit outcomes (success, retried, failed) to Supabase.
